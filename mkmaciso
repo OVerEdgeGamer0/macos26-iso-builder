@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2024–2025, LongQT-sea
+# Copyright (c) 2024–2026, LongQT-sea
 
 # mkmaciso – the ultimate tool for creating macOS installer ISO and DMG images
 
@@ -7,8 +7,8 @@
 
 # Goals:
 #   - Use only macOS built-in tools and commands.
-#   - Download macOS installers exclusively from official Apple sources.
-#   - Support macOS 10.7 Lion through macOS 26 Tahoe installers.
+#   - Download macOS installers exclusively from official Apple sources (or via torrent if specified).
+#   - Support macOS 10.7 Lion through macOS 27 Golden Gate installers.
 #   - Produce the smallest possible installer images for both formats.
 #   - The image must be usable on Windows and Linux.
 #
@@ -46,10 +46,21 @@ CATALINA_BASE_URL="https://swcdn.apple.com/content/downloads/26/37/001-68446/r1d
 MOJAVE_BASE_URL="https://swcdn.apple.com/content/downloads/17/32/061-26589-A_8GJTCGY9PC/25fhcu905eta7wau7aoafu8rvdm7k1j4el/"
 HIGH_SIERRA_BASE_URL="https://swcdn.apple.com/content/downloads/06/50/041-91758-A_M8T44LH2AW/b5r4og05fhbgatve4agwy4kgkzv07mdid9/"
 
+# Parse arguments to support --torrent flag
+TORRENT_MODE=false
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" == "--torrent" ]; then
+        TORRENT_MODE=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+
 # Default parameters
-VERSION="${1:-}"
-IMAGE_FORMAT="${2:-}"
-OUTPUT_PATH="${3:-}"
+VERSION="${ARGS[0]:-}"
+IMAGE_FORMAT="${ARGS[1]:-}"
+OUTPUT_PATH="${ARGS[2]:-}"
 RETRIES_COUNT=10
 FINAL_OUTPUT_PATH=""
 DISK_ID=""
@@ -181,6 +192,7 @@ get_version_number() {
         "sonoma") echo "14" ;;
         "sequoia") echo "15" ;;
         "tahoe") echo "26" ;;
+        "golden-gate"|"goldengate"|"golden_gate") echo "27" ;;
         *) echo "" ;;
     esac
 }
@@ -203,6 +215,7 @@ get_codename() {
         "14") echo "Sonoma" ;;
         "15") echo "Sequoia" ;;
         "26") echo "Tahoe" ;;
+        "27") echo "Golden_Gate" ;;
         *) echo "" ;;
     esac
 }
@@ -256,6 +269,9 @@ get_installer_app_name() {
         "26")
             echo "Install macOS Tahoe"
             ;;
+        "27")
+            echo "Install macOS Golden Gate"
+            ;;
         *)
             echo ""
             ;;
@@ -298,6 +314,7 @@ declare -a MACOS_VERSIONS=(
     "14|Sonoma|2023"
     "15|Sequoia|2024"
     "26|Tahoe|2025"
+    "27|Golden Gate|2026"
 )
 
 show_version_menu() {
@@ -333,7 +350,7 @@ show_version_menu() {
     echo ""
     print_separator
     echo ""
-    echo -e "  ${YELLOW}Default: 16 (Tahoe - latest)${NC}"
+    echo -e "  ${YELLOW}Default: 17 (Golden Gate - latest)${NC}"
     echo ""
     echo -n "  Enter your choice [2-$((total+1))] or press Enter for default: "
 }
@@ -430,9 +447,9 @@ run_interactive_menu() {
         show_version_menu
         read -r choice
         
-        # Default to Tahoe
+        # Default to Golden Gate
         if [ -z "$choice" ]; then
-            choice=16
+            choice=17
         fi
         
         # Validate input
@@ -553,9 +570,66 @@ run_interactive_menu() {
 # End of Interactive Menu Functions
 # =================================
 
+download_via_torrent() {
+    local version_name="$1"
+    local torrent_file=""
+    
+    # Try to find a matching .torrent file in the current directory
+    for f in "macOS_${version_name}.torrent" "macOS_${version_name// /_}.torrent" "macOS_${VERSION_NUM}.torrent"; do
+        if [ -f "$f" ]; then
+            torrent_file="$f"
+            break
+        fi
+    done
+
+    if [ -z "$torrent_file" ]; then
+        log_error "Torrent mode is enabled, but no .torrent file found for macOS $version_name."
+        log_error "Please place a valid .torrent file (e.g., macOS_${version_name}.torrent) in the current directory."
+        exit 1
+    fi
+
+    log_info "Found torrent file: $torrent_file"
+    
+    # Check for torrent clients
+    if command -v aria2c &> /dev/null; then
+        log_info "Using aria2c to download via torrent (this may take a while)..."
+        # Download to WORK_DIR, seed time 0
+        aria2c --seed-time=0 --dir="$WORK_DIR" --file-allocation=none "$torrent_file" || {
+            log_error "aria2c failed to download the torrent."
+            exit 1
+        }
+    elif command -v transmission-cli &> /dev/null; then
+        log_info "Using transmission-cli to download via torrent..."
+        transmission-cli -w "$WORK_DIR" "$torrent_file" || {
+            log_error "transmission-cli failed to download the torrent."
+            exit 1
+        }
+    else
+        log_error "No supported torrent client found (aria2c or transmission-cli)."
+        log_error "Please install aria2c (brew install aria2) or transmission-cli to use the --torrent flag."
+        exit 1
+    fi
+    
+    log_info "Torrent download completed. Files are in $WORK_DIR"
+    
+    # Find the .app file recursively in WORK_DIR (max depth 2 to avoid searching too deep)
+    local found_app=$(find "$WORK_DIR" -maxdepth 2 -name "*.app" -type d | head -1)
+    if [ -n "$found_app" ]; then
+        log_info "Found installer app in torrent download at $found_app. Moving to /Applications..."
+        local app_name=$(get_installer_app_name "$VERSION_NUM")
+        sudo cp -R "$found_app" "/Applications/$app_name.app"
+        sudo chown -R root:wheel "/Applications/$app_name.app"
+    fi
+}
+
 download_legacy_macos() {
     local version_num="$1"
     local download_url=""
+    
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "$(get_codename $version_num)"
+        return 0
+    fi
     
     case "$version_num" in
         "10.7")
@@ -594,6 +668,11 @@ download_legacy_macos() {
 # Reference: https://mavericksforever.com/get.sh
 
 download_mavericks() {
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "Mavericks"
+        return 0
+    fi
+
     local board_serial_number="C0243070168G3M91F"
     local board_id="Mac-3CBD00234E554E41"
     local rom="003EE1E6AC14"
@@ -711,6 +790,11 @@ direct_download_10_13_10_15() {
     local version_num="$1"
     local base_url=""
     
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "$(get_codename $version_num)"
+        return 0
+    fi
+
     # Determine base URL and version name
     case "$version_num" in
         "10.13")
@@ -803,6 +887,11 @@ download_modern_macos() {
     version_name=$(get_codename $version_num)
     version_name="${version_name/_/ }"
     
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "$version_name"
+        return 0
+    fi
+
     # Use direct download when softwareupdate is not available
     if [[ "$version_num" =~ ^10\.1[345]$ ]]; then
         # For Apple silicon: always use direct download for 10.13-10.15
@@ -1346,13 +1435,16 @@ main() {
         log_info "Run with -h or --help for usage"
         echo ""
         log_error "Unknown macOS version: $VERSION"
-        log_info "Supported versions: 10.7, 10.8, 10.9, 10.10, 10.11, 10.12, 10.13, 10.14, 10.15, 11, 12, 13, 14, 15, 26"
-        log_info "Supported codenames: lion, mountain-lion, mavericks, yosemite, el-capitan, sierra, high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe"
+        log_info "Supported versions: 10.7, 10.8, 10.9, 10.10, 10.11, 10.12, 10.13, 10.14, 10.15, 11, 12, 13, 14, 15, 26, 27"
+        log_info "Supported codenames: lion, mountain-lion, mavericks, yosemite, el-capitan, sierra, high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe, golden-gate"
         exit 1
     fi
     
     log_info "Target macOS:${GREEN} $VERSION_NAME ($VERSION_NUM) ${NC}"
     log_info "Image format:${GREEN} $(echo $IMAGE_FORMAT | tr '[:lower:]' '[:upper:]') ${NC}"
+    if [ "$TORRENT_MODE" = true ]; then
+        log_info "Download mode:${GREEN} BitTorrent ${NC}"
+    fi
     
     # Determine output filename if not specified
     if [ -z "$OUTPUT_PATH" ]; then
@@ -1466,18 +1558,24 @@ main() {
 }
 
 # Show usage if -h or --help is passed
-if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
-    cat << 'EOF'
+for arg in "$@"; do
+    if [ "$arg" == "--help" ] || [ "$arg" == "-h" ]; then
+        cat << 'EOF'
 ╔══════════════════════════════════════════════════════════════════════════════╗"
 ║ mkmaciso – the ultimate tool for creating macOS installer ISO and DMG images ║"
 ╚══════════════════════════════════════════════════════════════════════════════╝"
 
 Usage:
-  mkmaciso [VERSION] [FORMAT] [OUTPUT_PATH]
+  mkmaciso [OPTIONS] [VERSION] [FORMAT] [OUTPUT_PATH]
   mkmaciso                                     # Interactive mode
 
+Options:
+  --torrent         Use BitTorrent to download the installer (requires aria2c or transmission-cli)
+                    Place a .torrent file named macOS_<Version>.torrent in the current directory.
+  -h, --help        Show this help message
+
 Parameters:
-  VERSION         macOS version number or codename, e.g. 26 or Tahoe
+  VERSION         macOS version number or codename, e.g. 27 or Golden Gate
   FORMAT          iso or dmg (default: iso)
   OUTPUT_PATH     Output file path (default: ./macOS_<version>.<format>)
 
@@ -1490,11 +1588,13 @@ Supported versions:
   10.12 Sierra           14     Sonoma
   10.13 High Sierra      15     Sequoia
                          26     Tahoe
+                         27     Golden Gate
 
 Examples:
   mkmaciso                              Interactive mode
   mkmaciso 14                           Create Sonoma ISO
   mkmaciso 14 dmg                       Create Sonoma DMG
+  mkmaciso --torrent 27 dmg             Create Golden Gate DMG using torrent
   mkmaciso sonoma dmg ~/Desktop/out.dmg Create Sonoma DMG at specified path
 
 Requirements:
@@ -1504,19 +1604,20 @@ Requirements:
   - Administrator privileges (sudo)
   - For best results, run this on Intel Macs
 EOF
-    exit 0
-fi
+        exit 0
+    fi
+done
 
 # Check if running in interactive mode with piped (no parameters)
-if [ $# -eq 0 ]; then
+if [ ${#ARGS[@]} -eq 0 ]; then
     if [ -p /dev/stdin ] || [ ! -t 0 ]; then
         clear
         log_error "Interactive mode unavailable when piped"
         log_info "Usage: curl -sL <URL> | bash -s <VERSION> [FORMAT] [OUTPUT]"
         echo ""
-        log_info "Example: curl -sL <URL> | bash -s 26"
-        log_info "Example: curl -sL <URL> | bash -s 26 dmg"
-        log_info "Example: curl -sL <URL> | bash -s 26 iso ~/Desktop/Tahoe.iso"
+        log_info "Example: curl -sL <URL> | bash -s 27"
+        log_info "Example: curl -sL <URL> | bash -s 27 dmg"
+        log_info "Example: curl -sL <URL> | bash -s 27 iso ~/Desktop/GoldenGate.iso"
         exit 1
     fi
     run_interactive_menu
