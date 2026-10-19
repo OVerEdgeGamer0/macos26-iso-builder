@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2024–2025, LongQT-sea
+# Copyright (c) 2024–2026, LongQT-sea
 
 # mkmaciso – the ultimate tool for creating macOS installer ISO and DMG images
 
@@ -7,8 +7,8 @@
 
 # Goals:
 #   - Use only macOS built-in tools and commands.
-#   - Download macOS installers exclusively from official Apple sources.
-#   - Support macOS 10.7 Lion through macOS 26 Tahoe installers.
+#   - Download macOS installers exclusively from official Apple sources (or via torrent if specified).
+#   - Support macOS 10.7 Lion through macOS 27 Golden Gate installers.
 #   - Produce the smallest possible installer images for both formats.
 #   - The image must be usable on Windows and Linux.
 #
@@ -46,10 +46,21 @@ CATALINA_BASE_URL="https://swcdn.apple.com/content/downloads/26/37/001-68446/r1d
 MOJAVE_BASE_URL="https://swcdn.apple.com/content/downloads/17/32/061-26589-A_8GJTCGY9PC/25fhcu905eta7wau7aoafu8rvdm7k1j4el/"
 HIGH_SIERRA_BASE_URL="https://swcdn.apple.com/content/downloads/06/50/041-91758-A_M8T44LH2AW/b5r4og05fhbgatve4agwy4kgkzv07mdid9/"
 
+# Parse arguments to support --torrent flag
+TORRENT_MODE=false
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" == "--torrent" ]; then
+        TORRENT_MODE=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+
 # Default parameters
-VERSION="${1:-}"
-IMAGE_FORMAT="${2:-}"
-OUTPUT_PATH="${3:-}"
+VERSION="${ARGS[0]:-}"
+IMAGE_FORMAT="${ARGS[1]:-}"
+OUTPUT_PATH="${ARGS[2]:-}"
 RETRIES_COUNT=10
 FINAL_OUTPUT_PATH=""
 DISK_ID=""
@@ -181,6 +192,7 @@ get_version_number() {
         "sonoma") echo "14" ;;
         "sequoia") echo "15" ;;
         "tahoe") echo "26" ;;
+        "goldengate"|"golden-gate"|"golden_gate") echo "27" ;;
         *) echo "" ;;
     esac
 }
@@ -203,6 +215,7 @@ get_codename() {
         "14") echo "Sonoma" ;;
         "15") echo "Sequoia" ;;
         "26") echo "Tahoe" ;;
+        "27") echo "Golden_Gate" ;;
         *) echo "" ;;
     esac
 }
@@ -256,6 +269,9 @@ get_installer_app_name() {
         "26")
             echo "Install macOS Tahoe"
             ;;
+        "27")
+            echo "Install macOS Golden Gate"
+            ;;
         *)
             echo ""
             ;;
@@ -298,6 +314,7 @@ declare -a MACOS_VERSIONS=(
     "14|Sonoma|2023"
     "15|Sequoia|2024"
     "26|Tahoe|2025"
+    "27|Golden Gate|2026"
 )
 
 show_version_menu() {
@@ -333,7 +350,7 @@ show_version_menu() {
     echo ""
     print_separator
     echo ""
-    echo -e "  ${YELLOW}Default: 16 (Tahoe - latest)${NC}"
+    echo -e "  ${YELLOW}Default: 17 (Golden Gate - latest)${NC}"
     echo ""
     echo -n "  Enter your choice [2-$((total+1))] or press Enter for default: "
 }
@@ -430,9 +447,9 @@ run_interactive_menu() {
         show_version_menu
         read -r choice
         
-        # Default to Tahoe
+        # Default to Golden Gate
         if [ -z "$choice" ]; then
-            choice=16
+            choice=17
         fi
         
         # Validate input
@@ -553,9 +570,66 @@ run_interactive_menu() {
 # End of Interactive Menu Functions
 # =================================
 
+download_via_torrent() {
+    local version_name="$1"
+    local torrent_file=""
+    
+    # Try to find a matching .torrent file in the current directory
+    for f in "macOS_${version_name}.torrent" "macOS_${version_name// /_}.torrent" "macOS_${VERSION_NUM}.torrent"; do
+        if [ -f "$f" ]; then
+            torrent_file="$f"
+            break
+        fi
+    done
+
+    if [ -z "$torrent_file" ]; then
+        log_error "Torrent mode is enabled, but no .torrent file found for macOS $version_name."
+        log_error "Please place a valid .torrent file (e.g., macOS_${version_name}.torrent) in the current directory."
+        exit 1
+    fi
+
+    log_info "Found torrent file: $torrent_file"
+    
+    # Check for torrent clients
+    if command -v aria2c &> /dev/null; then
+        log_info "Using aria2c to download via torrent (this may take a while)..."
+        # Download to WORK_DIR, seed time 0
+        aria2c --seed-time=0 --dir="$WORK_DIR" --file-allocation=none "$torrent_file" || {
+            log_error "aria2c failed to download the torrent."
+            exit 1
+        }
+    elif command -v transmission-cli &> /dev/null; then
+        log_info "Using transmission-cli to download via torrent..."
+        transmission-cli -w "$WORK_DIR" "$torrent_file" || {
+            log_error "transmission-cli failed to download the torrent."
+            exit 1
+        }
+    else
+        log_error "No supported torrent client found (aria2c or transmission-cli)."
+        log_error "Please install aria2c (brew install aria2) or transmission-cli to use the --torrent flag."
+        exit 1
+    fi
+    
+    log_info "Torrent download completed. Files are in $WORK_DIR"
+    
+    # Find the .app file recursively in WORK_DIR (max depth 2 to avoid searching too deep)
+    local found_app=$(find "$WORK_DIR" -maxdepth 2 -name "*.app" -type d | head -1)
+    if [ -n "$found_app" ]; then
+        log_info "Found installer app in torrent download at $found_app. Moving to /Applications..."
+        local app_name=$(get_installer_app_name "$VERSION_NUM")
+        sudo cp -R "$found_app" "/Applications/$app_name.app"
+        sudo chown -R root:wheel "/Applications/$app_name.app"
+    fi
+}
+
 download_legacy_macos() {
     local version_num="$1"
     local download_url=""
+    
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "$(get_codename $version_num)"
+        return 0
+    fi
     
     case "$version_num" in
         "10.7")
@@ -584,29 +658,24 @@ download_legacy_macos() {
     esac
     
     log_info "Downloading macOS $(get_codename $version_num)..."
-    # If download does not finish within 30 minutes (--max-time 1800), redownload to establish a new connection.
     curl --retry 5 --max-time 1800 --connect-timeout 10 --progress-bar -L "$download_url" -o "$WORK_DIR/InstallMacOSX.dmg"
 }
 
-# macOS 10.9 Mavericks requires special handling:
-# 1. Must use Apple's recovery server protocol to download
-# 2. Requires specific hardware identifiers for authentication
-# Reference: https://mavericksforever.com/get.sh
-
 download_mavericks() {
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "Mavericks"
+        return 0
+    fi
+
     local board_serial_number="C0243070168G3M91F"
     local board_id="Mac-3CBD00234E554E41"
     local rom="003EE1E6AC14"
     
     hex_to_bin() { printf "%s" "$1" | xxd -r -p; }
     
-    # Get server ID
     local server_id=$(curl -fs -c - http://osrecovery.apple.com/ | tail -1 | awk '{print $NF}')
-    
-    # Generate client ID
     local client_id=$(dd if=/dev/urandom bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | tr '[:lower:]' '[:upper:]')
     
-    # Create key_info file
     {
         hex_to_bin "$client_id"
         hex_to_bin "$(echo $server_id | awk -F'~' '{print $2}')"
@@ -615,11 +684,9 @@ download_mavericks() {
         printf '\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC'
     } > "$WORK_DIR/key_info"
     
-    # Generate key
     local key=$(openssl dgst -sha256 -binary < "$WORK_DIR/key_info" | od -An -tx1 | tr -d ' \n' | tr '[:lower:]' '[:upper:]')
     rm "$WORK_DIR/key_info"
     
-    # Get installation payload
     local installation_payload=$(curl -fs 'http://osrecovery.apple.com/InstallationPayload/OSInstaller' -X POST \
         -H 'Content-Type: text/plain' \
         --cookie "session=$server_id" \
@@ -628,15 +695,12 @@ sn=$board_serial_number
 bid=$board_id
 k=$key")
     
-    # Extract asset URL and token
     local mavericks_url=$(echo "$installation_payload" | grep AU | awk -F': ' '{print $2}')
     local token=$(echo "$installation_payload" | grep AT | awk -F': ' '{print $2}')
     log_info "Mavericks URL detected: $mavericks_url"
     echo ""
     log_info "Downloading macOS Mavericks using special method..."
     
-    # Download Mavericks InstallESD.dmg
-    # If download does not finish within 30 minutes (--max-time 1800), redownload to establish a new connection.
     curl --retry 5 --max-time 1800 --connect-timeout 10 --progress-bar -L "$mavericks_url" -H "Cookie: AssetToken=$token" -o "$WORK_DIR/InstallESD.dmg"
 }
 
@@ -647,50 +711,33 @@ install_legacy_app() {
     log_info "Installing macOS $(get_codename $version_num) installer to /Applications..."
     
     if [[ "$version_num" =~ ^(10\.7|10\.8|10\.10|10\.11|10\.12)$ ]]; then
-        # Mount the downloaded DMG image
         hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/downloaded_dmg_mnt" "$dmg_file"
         
-        # Manual installation process for Apple silicon.
-        # The 'Install OSX/macOS.app' produced by manual install is not suitable
-        # for creating a bootable USB using 'createinstallmedia'.
         if [ "$CPU_ARCH" == "arm64" ]; then
             log_info "Apple silicon detected, using manual installation..."
-            
-            # Extract the package
             pkgutil --expand "$WORK_DIR/downloaded_dmg_mnt"/*.pkg "$WORK_DIR/pkg_extracted"
-            
-            # Find the inner package directory (InstallMacOSX.pkg)
             local inner_pkg=$(ls -d "$WORK_DIR/pkg_extracted"/*.pkg 2>/dev/null | head -1)
             
-            # Extract the app from Payload to /Applications
             cd /Applications
             sudo cpio -idm < "$inner_pkg/Payload"
             cd - > /dev/null
             
-            # Copy InstallESD.dmg
             local app_path="/Applications/$(get_installer_app_name $version_num).app"
             sudo ditto "$inner_pkg/InstallESD.dmg" "$app_path/Contents/SharedSupport/InstallESD.dmg"
             sudo chown root:wheel "$app_path/Contents/SharedSupport/InstallESD.dmg"
             
             log_info "Installed $(get_installer_app_name $version_num) to /Applications"
-            log_warn "Note: This $(get_installer_app_name $version_num) is not suitable for creating a bootable USB using 'createinstallmedia'"
-            
         else
-            # Standard installation for Intel Macs
             sudo installer -pkg "$WORK_DIR/downloaded_dmg_mnt"/*.pkg -target / && \
                 log_info "Installed $(get_installer_app_name $version_num) to /Applications"
         fi
         
         sync && detach_disk "$WORK_DIR/downloaded_dmg_mnt"
-    
     elif [ "$version_num" == "10.9" ]; then
-        # Check if InstallESD.dmg exists
         if [ -f "$WORK_DIR/InstallESD.dmg" ]; then
-            # Mount InstallESD.dmg and BaseSystem.dmg inside it
             hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/InstallESD_mnt" "$WORK_DIR/InstallESD.dmg"
             hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/BaseSystem_mnt" "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg"
             
-            # Copy required files
             sudo cp -a "$WORK_DIR/BaseSystem_mnt/Install OS X Mavericks.app" "/Applications/"
             sudo mkdir "/Applications/Install OS X Mavericks.app/Contents/SharedSupport"
             sudo cp -a "$WORK_DIR/InstallESD.dmg" "/Applications/Install OS X Mavericks.app/Contents/SharedSupport/InstallESD.dmg"
@@ -698,39 +745,31 @@ install_legacy_app() {
             sudo chown -R root:wheel "/Applications/Install OS X Mavericks.app/Contents/SharedSupport/"
             
             log_info "Installed $(get_installer_app_name $version_num) to /Applications"
-            
-            # Unmount
             sync && detach_disk "$WORK_DIR/BaseSystem_mnt"
             sync && detach_disk "$WORK_DIR/InstallESD_mnt"
         fi
     fi
 }
 
-# Reference: https://www.insanelymac.com/forum/topic/338810-create-legit-copy-of-macos-from-apple-catalog/
 direct_download_10_13_10_15() {
     local version_num="$1"
     local base_url=""
     
-    # Determine base URL and version name
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "$(get_codename $version_num)"
+        return 0
+    fi
+
     case "$version_num" in
-        "10.13")
-            base_url="$HIGH_SIERRA_BASE_URL"
-            ;;
-        "10.14")
-            base_url="$MOJAVE_BASE_URL"
-            ;;
-        "10.15")
-            base_url="$CATALINA_BASE_URL"
-            ;;
-        *)
-            return 1
-            ;;
+        "10.13") base_url="$HIGH_SIERRA_BASE_URL" ;;
+        "10.14") base_url="$MOJAVE_BASE_URL" ;;
+        "10.15") base_url="$CATALINA_BASE_URL" ;;
+        *) return 1 ;;
     esac
     
     log_info "Downloading macOS $(get_codename $version_num) installer using direct Apple URLs..."
     echo ""
     
-    # Required files for 10.13-10.15
     local files=(
         "BaseSystem.dmg"
         "BaseSystem.chunklist"
@@ -740,7 +779,6 @@ direct_download_10_13_10_15() {
         "AppleDiagnostics.chunklist"
     )
     
-    # Download all required files
     for filename in "${files[@]}"; do
         log_info "Downloading ${filename}..."
         curl --retry 5 --max-time 1800 --connect-timeout 10 --progress-bar \
@@ -754,27 +792,20 @@ direct_download_10_13_10_15() {
     echo ""
     log_info "All files downloaded. Building macOS $(get_codename $version_num) installer app..."
     
-    # Mount BaseSystem.dmg to extract the app
     hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/BaseSystem_mnt" "$WORK_DIR/BaseSystem.dmg"
-    
-    # Copy installer app to /Applications
     local installer_app="$WORK_DIR/BaseSystem_mnt/$(get_installer_app_name $version_num).app"
     sudo cp -Rp "$installer_app" "/Applications/"
     
-    # Create SharedSupport directory
     local shared_support="/Applications/$(get_installer_app_name $version_num).app/Contents/SharedSupport"
     sudo mkdir -p "$shared_support"
     
-    # Rename InstallESDDmg.pkg to InstallESD.dmg
     mv "$WORK_DIR/InstallESDDmg.pkg" "$WORK_DIR/InstallESD.dmg"
     
-    # Fix InstallInfo.plist
     sed -e "s/InstallESDDmg\.pkg/InstallESD.dmg/" \
         -e "s/pkg\.InstallESDDmg/dmg.InstallESD/" \
         -e "/InstallESD\.dmg/{n;N;N;N;d;}" \
         "$WORK_DIR/InstallInfo.plist" > "$WORK_DIR/InstallInfo_fixed.plist"
     
-    # Copy files to SharedSupport
     sudo cp -Rp "$WORK_DIR/BaseSystem.dmg" "$shared_support/"
     sudo cp -Rp "$WORK_DIR/BaseSystem.chunklist" "$shared_support/"
     sudo cp -Rp "$WORK_DIR/InstallInfo_fixed.plist" "$shared_support/InstallInfo.plist"
@@ -782,18 +813,14 @@ direct_download_10_13_10_15() {
     sudo cp -Rp "$WORK_DIR/AppleDiagnostics.dmg" "$shared_support/"
     sudo cp -Rp "$WORK_DIR/AppleDiagnostics.chunklist" "$shared_support/"
     
-    # Set proper ownership
     sudo chown -R root:wheel "$shared_support"
     
-    # Resign createinstallmedia and remove quarantine tag for Apple Silicon
     if [ "$CPU_ARCH" == "arm64" ] && [[ "$version_num" =~ ^10\.1[3-5]$ ]]; then
         sudo codesign -s - -f "/Applications/$(get_installer_app_name $version_num).app/Contents/Resources/createinstallmedia"
         sudo xattr -r -d com.apple.quarantine "/Applications/$(get_installer_app_name $version_num).app"
     fi
     
-    # Detach BaseSystem.dmg
     sync && sleep 10 && detach_disk "$WORK_DIR/BaseSystem_mnt"
-    
     log_info "Successfully installed $(get_installer_app_name $version_num) to /Applications"
     return 0
 }
@@ -803,61 +830,36 @@ download_modern_macos() {
     version_name=$(get_codename $version_num)
     version_name="${version_name/_/ }"
     
-    # Use direct download when softwareupdate is not available
+    if [ "$TORRENT_MODE" = true ]; then
+        download_via_torrent "$version_name"
+        return 0
+    fi
+
     if [[ "$version_num" =~ ^10\.1[345]$ ]]; then
-        # For Apple silicon: always use direct download for 10.13-10.15
         if [ "$CPU_ARCH" == "arm64" ]; then
             log_info "Apple silicon detected"
             echo ""
-            
-            # Show warning on Apple silicon
-            log_warn "╔═════════════════════════════════════════════════════════════════╗"
-            log_warn "║                     Apple silicon Limitation                    ║"
-            log_warn "╠═════════════════════════════════════════════════════════════════╣"
-            log_warn "║ On Apple silicon, softwareupdate cannot download macOS versions ║"
-            log_warn "║ older than the one that originally shipped with your device.    ║"
-            log_warn "╚═════════════════════════════════════════════════════════════════╝"
-            echo ""
             direct_download_10_13_10_15 "$version_num"
             return $?
         fi
         
-        # For Intel: use direct download if running kernel < 20 (pre-Big Sur)
         if [ "$CPU_ARCH" = "x86_64" ] && [ "$KERNEL_VERSION" -lt 20 ]; then
-            log_info "Intel CPU detected"
-            log_info "This Mac is running a version older than Big Sur, will attempt direct download for macOS $version_name"
+            log_info "Intel CPU detected, attempting direct download for macOS $version_name"
             direct_download_10_13_10_15 "$version_num"
             return $?
         fi
-    
     fi
     
-    # Use softwareupdate for macOS Big Sur and newer
-    # Check CPU architecture compatibility for softwareupdate
     if [ "$CPU_ARCH" = "x86_64" ] && [ "$KERNEL_VERSION" -lt 20 ]; then
-        log_info "Intel CPU detected"
-        
-        # Intel Macs require macOS 11 or newer for softwareupdate
         log_error "Intel Macs must be running macOS 11 (Big Sur) or newer to download macOS using softwareupdate"
-        log_error "Please upgrade your macOS to version 11 or newer"
         return 1
-        
     elif [ "$CPU_ARCH" == "arm64" ]; then
         log_info "Apple silicon detected"
-        
-        # Show warning on Apple silicon
-        log_warn "╔═════════════════════════════════════════════════════════════════╗"
-        log_warn "║                     Apple silicon Limitation                    ║"
-        log_warn "╠═════════════════════════════════════════════════════════════════╣"
-        log_warn "║ On Apple silicon, softwareupdate cannot download macOS versions ║"
-        log_warn "║ older than the one that originally shipped with your device.    ║"
-        log_warn "╚═════════════════════════════════════════════════════════════════╝"
     fi
     
     log_info "Fetching available macOS installers..."
     softwareupdate --list-full-installers 2>/dev/null | grep "* Title:" | sed 's/^[[:space:]]*//' > $WORK_DIR/installers.txt
     
-    # Get latest installer version
     local selected_version_number=$(grep -i "$version_name" $WORK_DIR/installers.txt | head -1 | sed -n 's/.*Version: \([^,]*\).*/\1/p')
     
     if [ -z "$selected_version_number" ]; then
@@ -868,9 +870,8 @@ download_modern_macos() {
     fi
     
     log_info "Found latest $version_name version: $selected_version_number"
-    log_info "Downloading and installing macOS $version_name installer (this may take a while)..."
+    log_info "Downloading and installing macOS $version_name installer..."
     
-    # Download with retries (max 4 times)
     local download_retries=4
     for attempt in $(seq 1 $download_retries); do
         log_info "Download attempt $attempt of $download_retries..."
@@ -897,29 +898,17 @@ create_iso_dmg_10_7_10_8() {
     log_info "Creating macOS $(get_codename $version_num) $image_format image..."
     echo ""
     
-    # Mount InstallESD.dmg
     hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/InstallESD_mnt" "$installer_path/Contents/SharedSupport/InstallESD.dmg"
-    
-    # Extract the exact version number and append it to the file name
     local exact_version_number=$(defaults read "$WORK_DIR/InstallESD_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
     FINAL_OUTPUT_PATH="${output_file%.${IMAGE_FORMAT}}_$exact_version_number.${IMAGE_FORMAT}"
 
-    # Create final image
     if [ "$IMAGE_FORMAT" == "dmg" ]; then
-        # Create DMG with GUID Partition Table from mounted InstallESD.dmg
         sudo hdiutil create -quiet -layout GPTSPUD -format UDRW -ov -volname "$volume_name" -srcdir "$WORK_DIR/InstallESD_mnt" "$FINAL_OUTPUT_PATH"
-        
-        # Append .img extension
         mv -f "$FINAL_OUTPUT_PATH" "${FINAL_OUTPUT_PATH}.img"
         FINAL_OUTPUT_PATH="${FINAL_OUTPUT_PATH}.img"
-        
-        # Unmount
         sync && detach_disk "$WORK_DIR/InstallESD_mnt"
-        
     else
-        # Unmount
         sync && detach_disk "$WORK_DIR/InstallESD_mnt"
-        
         log_info "Converting to ISO format..."
         sudo hdiutil makehybrid -quiet -ov -hfs -udf -default-volume-name "$volume_name" "$installer_path/Contents/SharedSupport/InstallESD.dmg" -o "$FINAL_OUTPUT_PATH"
     fi
@@ -932,42 +921,27 @@ create_iso_10_9_10_11() {
     local version_num="$4"
     
     log_info "Creating macOS $(get_codename $version_num) ISO image..."
-    
-    # Mount InstallESD.dmg
     hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/InstallESD_mnt" "$installer_path/Contents/SharedSupport/InstallESD.dmg"
-    
-    # Convert BaseSystem.dmg
     hdiutil convert -quiet "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg" -format UDRW -o "$WORK_DIR/BaseSystem_converted.dmg"
-    
-    # Increase size
     sudo hdiutil resize -size 7.1g "$WORK_DIR/BaseSystem_converted.dmg"
     
-    # Mount the converted DMG
     DISK_ID=$(hdiutil attach -nobrowse -mountpoint "$WORK_DIR/BaseSystem_mnt" "$WORK_DIR/BaseSystem_converted.dmg" | grep -o '/dev/disk[0-9]*' | head -1)
     
-    # Remove Packages symlink and copy actual Packages
     rm "$WORK_DIR/BaseSystem_mnt/System/Installation/Packages"
     cp -R "$WORK_DIR/InstallESD_mnt/Packages" "$WORK_DIR/BaseSystem_mnt/System/Installation/"
-    
-    # Copy required files
     cp "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg" "$WORK_DIR/BaseSystem_mnt/"
     cp "$WORK_DIR/InstallESD_mnt/BaseSystem.chunklist" "$WORK_DIR/BaseSystem_mnt/"
 	
-    # Note: For Mavericks UDF format, boot.efi attempts to load /mach_kernel, but none exists.
-    # Although we can extract it from Packages/BaseSystemBinaries.pkg, there's a simpler solution:
     if [ "$version_num" == "10.9" ]; then
         cp "$WORK_DIR/BaseSystem_mnt/System/Library/Caches/com.apple.kext.caches/Startup/kernelcache" "$WORK_DIR/BaseSystem_mnt/mach_kernel"
     fi
 	
-    # Extract the exact version number and append it to the file name
     local exact_version_number=$(defaults read "$WORK_DIR/BaseSystem_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
     FINAL_OUTPUT_PATH="${output_file%.iso}_$exact_version_number.iso"
     
-    # Unmount
     detach_disk "$WORK_DIR/InstallESD_mnt"
     detach_disk "$DISK_ID" && DISK_ID=""
     
-    # Create ISO
     log_info "Converting to ISO format..."
     sudo hdiutil makehybrid -quiet -ov -hfs -udf -default-volume-name "$volume_name" \
         "$WORK_DIR/BaseSystem_converted.dmg" -o "$FINAL_OUTPUT_PATH"
@@ -982,73 +956,44 @@ create_dmg_10_9_to_10_12_alt_method() {
     log_info "Creating macOS $(get_codename $version_num) DMG image..."
     echo ""
     
-    # Mount InstallESD.dmg
     hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/InstallESD_mnt" "$installer_path/Contents/SharedSupport/InstallESD.dmg"
 	
     if [[ "$version_num" =~ ^(10\.9|10\.10)$ ]]; then
-        # Attach BaseSystem.dmg
         BaseSystem_DISK_ID=$(hdiutil attach "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg" -nomount | grep -o '/dev/disk[0-9]*' | head -1)
-        
-    	# Create a DMG with GUID Partition Table and attach it
     	hdiutil create -quiet -ov -fs hfs+ -size 1400m "$WORK_DIR/installer_gpt.dmg"
         DISK_ID=$(hdiutil attach "$WORK_DIR/installer_gpt.dmg" -nomount | grep -o '/dev/disk[0-9]*' | head -1)
         
-        # Write the bootable recovery partition to the first partition on the DMG image
         sudo dd if="${BaseSystem_DISK_ID}s2" of="${DISK_ID}s1" bs=1m && detach_disk "$BaseSystem_DISK_ID"
-        
-        # Unmount
         detach_disk "$DISK_ID" && DISK_ID=""
-        
-        # Increase size
         sudo hdiutil resize -size 7g "$WORK_DIR/installer_gpt.dmg"
-        
     elif [[ "$version_num" =~ ^(10\.11|10\.12)$ ]]; then
         local dmg_size
         case "$version_num" in
-            "10.11")
-                dmg_size="7.1"
-                ;;
-            *)
-                dmg_size="5.9"
-                ;;
+            "10.11") dmg_size="7.1" ;;
+            *) dmg_size="5.9" ;;
         esac
-        
-        # El Capitan and Sierra BaseSystem.dmg already use a GUID Partition Table
-        # Convert BaseSystem.dmg
         hdiutil convert -quiet "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg" -format UDRW -o "$WORK_DIR/installer_gpt.dmg"
-        
-        # Increase size
         sudo hdiutil resize -size ${dmg_size}g "$WORK_DIR/installer_gpt.dmg"
     fi
     
-    # Mount DMG image and change volume name
     DISK_ID=$(hdiutil attach -nobrowse -mountpoint "$WORK_DIR/installer_mnt" "$WORK_DIR/installer_gpt.dmg" | grep -o '/dev/disk[0-9]*' | head -1)
     diskutil rename "${DISK_ID}s1" "$volume_name"
     
-    # Remove Packages symlink and copy actual Packages
     rm "$WORK_DIR/installer_mnt/System/Installation/Packages"
     ditto "$WORK_DIR/InstallESD_mnt/Packages" "$WORK_DIR/installer_mnt/System/Installation/Packages"
     
-    # Copy required files
     cp -R "$WORK_DIR/InstallESD_mnt/BaseSystem.dmg" "$WORK_DIR/installer_mnt/"
     cp -R "$WORK_DIR/InstallESD_mnt/BaseSystem.chunklist" "$WORK_DIR/installer_mnt/"
     
-    # Extract the exact version number and append it to the file name
     local exact_version_number=$(defaults read "$WORK_DIR/installer_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
     FINAL_OUTPUT_PATH="${output_file%.dmg}_$exact_version_number.dmg.img"
     
-	sync && sleep 5
-	
-    # Unmount
+    sync && sleep 5
     detach_disk "$WORK_DIR/InstallESD_mnt"
     detach_disk "$DISK_ID" && DISK_ID=""
 	
-    # Optimize DMG file size
     log_info "Optimizing DMG file size..."
     sudo hdiutil resize -size min "$WORK_DIR/installer_gpt.dmg"
-    
-    # Move to output
-    log_info "Move to $FINAL_OUTPUT_PATH"
     mv -f "$WORK_DIR/installer_gpt.dmg" "$FINAL_OUTPUT_PATH"
 }
 
@@ -1059,33 +1004,22 @@ create_iso_dmg_10_15_alt_method() {
     local version_num="$4"
     local image_format=$(echo "$IMAGE_FORMAT" | tr '[:lower:]' '[:upper:]')
     
-    log_info "Apple Silicon detected. Using alternative method for Catalina instead of 'createinstallmedia'"
+    log_info "Apple Silicon detected. Using alternative method..."
     echo ""
     log_info "Creating macOS $(get_codename $version_num) $image_format image..."
     echo ""
     
-    # Mount InstallESD.dmg
     hdiutil attach -nobrowse -quiet -mountpoint "$WORK_DIR/InstallESD_mnt" "$installer_path/Contents/SharedSupport/InstallESD.dmg"
-    
-    # Convert BaseSystem.dmg
     local basesystem_path="$installer_path/Contents/SharedSupport/BaseSystem.dmg"
-    
     hdiutil convert -quiet "$basesystem_path" -format UDRW -o "$WORK_DIR/BaseSystem_converted.dmg"
-    
-    # Increase size
     sudo hdiutil resize -size 9g "$WORK_DIR/BaseSystem_converted.dmg"
     
-    # Mount the converted DMG
     DISK_ID=$(hdiutil attach -nobrowse -mountpoint "$WORK_DIR/BaseSystem_mnt" "$WORK_DIR/BaseSystem_converted.dmg" | grep -o '/dev/disk[0-9]*' | head -1)
     diskutil rename "${DISK_ID}s1" "$volume_name"
     
-    # Remove the stub installer app
     rm -rf "$WORK_DIR/BaseSystem_mnt/$(get_installer_app_name $version_num).app"
-    
-    # Copy actual installer app from /Applications
     cp -R "$installer_path" "$WORK_DIR/BaseSystem_mnt/"
 
-    # Extract the exact version number and append it to the file name
     local exact_version_number=$(defaults read "$WORK_DIR/BaseSystem_mnt/System/Library/CoreServices/SystemVersion" ProductVersion)
     if [ "$IMAGE_FORMAT" == "dmg" ]; then
         FINAL_OUTPUT_PATH="${output_file%.dmg}_$exact_version_number.dmg.img"
@@ -1093,18 +1027,12 @@ create_iso_dmg_10_15_alt_method() {
         FINAL_OUTPUT_PATH="${output_file%.iso}_$exact_version_number.iso"
     fi
     
-    # Unmount
     detach_disk "$WORK_DIR/InstallESD_mnt"
     detach_disk "$DISK_ID" && DISK_ID=""
     
-    # Create final image
     if [ "$IMAGE_FORMAT" == "dmg" ]; then
-        # Optimize DMG file size
         log_info "Optimizing DMG file size..."
         sudo hdiutil resize -size min "$WORK_DIR/BaseSystem_converted.dmg"
-        
-        # Move to output
-        log_info "Move to $FINAL_OUTPUT_PATH"
         mv -f "$WORK_DIR/BaseSystem_converted.dmg" "$FINAL_OUTPUT_PATH"
     else
         log_info "Converting to ISO format..."
@@ -1117,22 +1045,12 @@ create_iso_10_12_and_later() {
     local output_file="$2"
     local version_num="$3"
     
-    # macOS Sierra and Catalina 'createinstallmedia' fails when running on Apple silicon
-    # Redirecting to alternative method
     if [[ "$CPU_ARCH" == "arm64" ]]; then
         if [[ "$version_num" == "10.12" ]]; then
-            create_iso_10_9_10_11 \
-                "$installer_path" \
-                "$output_file" \
-                "$(get_installer_app_name "$version_num")" \
-                "$version_num"
+            create_iso_10_9_10_11 "$installer_path" "$output_file" "$(get_installer_app_name "$version_num")" "$version_num"
             return $?
         elif [[ "$version_num" == "10.15" ]]; then
-            create_iso_dmg_10_15_alt_method \
-                "$installer_path" \
-                "$output_file" \
-                "$(get_installer_app_name "$version_num")" \
-                "$version_num"
+            create_iso_dmg_10_15_alt_method "$installer_path" "$output_file" "$(get_installer_app_name "$version_num")" "$version_num"
             return $?
         fi
     fi
@@ -1140,40 +1058,31 @@ create_iso_10_12_and_later() {
     log_info "Creating macOS $(get_codename $version_num) ISO image..."
     echo ""
     
-    # Create sparse image
     hdiutil create -quiet -size 20g -volname "$(get_codename $version_num)_iso" -fs HFS+ -type SPARSE -attach "$WORK_DIR/installer.sparseimage"
     DISK_ID=$(diskutil list | grep $(get_codename $version_num)_iso | head -1 | awk '{print $NF}' | sed 's/s[0-9]*$//')
     
-    # Prepare createinstallmedia command
     local cmd="sudo '$installer_path/Contents/Resources/createinstallmedia' --volume /Volumes/$(get_codename $version_num)_iso --nointeraction"
 
-    # For macOS 10.12, need to patch Info.plist
-    # For macOS 10.10-10.12, need to add --applicationpath
     if [ "$version_num" == "10.12" ]; then
         log_info "Patching Info.plist for Sierra compatibility..."
         sudo /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '12.6.03'" "$installer_path/Contents/Info.plist"
         cmd="$cmd --applicationpath \"$installer_path\""
     fi
     
-    # Create install media
     log_info "Running createinstallmedia..."
     bash -c "$cmd"
     sync && sleep 5
     
-    # Extract the exact version number and append it to the file name
     local exact_version_number=$(defaults read "/Volumes/$(get_installer_app_name "$version_num")/System/Library/CoreServices/SystemVersion" ProductVersion)
     FINAL_OUTPUT_PATH="${output_file%.iso}_$exact_version_number.iso"
     
-    # Restore Info.plist
     if [ "$version_num" == "10.12" ]; then
         sudo /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '12.6.06'" "/Applications/Install macOS Sierra.app/Contents/Info.plist"
         sudo /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '12.6.06'" "/Volumes/Install macOS Sierra/Install macOS Sierra.app/Contents/Info.plist"
     fi
     
-    # Unmount
     detach_disk "$DISK_ID" && DISK_ID=""
     
-    # Create ISO from sparse image
     log_info "Converting to ISO format..."
     sudo hdiutil makehybrid -quiet -ov -hfs -udf "$WORK_DIR/installer.sparseimage" -o "$FINAL_OUTPUT_PATH"
 }
@@ -1183,22 +1092,12 @@ create_dmg_10_10_and_later() {
     local output_file="$2"
     local version_num="$3"
     
-    # macOS Catalina, Sierra, El Capitan, and Yosemite 'createinstallmedia' fails when running on Apple silicon
-    # Redirecting to alternative method
     if [[ "$CPU_ARCH" == "arm64" ]]; then
         if [[ "$version_num" =~ ^10\.1[012]$ ]]; then
-            create_dmg_10_9_to_10_12_alt_method \
-                "$installer_path" \
-                "$output_file" \
-                "$(get_installer_app_name "$version_num")" \
-                "$version_num"
+            create_dmg_10_9_to_10_12_alt_method "$installer_path" "$output_file" "$(get_installer_app_name "$version_num")" "$version_num"
             return $?
         elif [[ "$version_num" = "10.15" ]]; then
-            create_iso_dmg_10_15_alt_method \
-                "$installer_path" \
-                "$output_file" \
-                "$(get_installer_app_name "$version_num")" \
-                "$version_num"
+            create_iso_dmg_10_15_alt_method "$installer_path" "$output_file" "$(get_installer_app_name "$version_num")" "$version_num"
             return $?
         fi
     fi
@@ -1206,39 +1105,23 @@ create_dmg_10_10_and_later() {
     log_info "Creating macOS $(get_codename $version_num) DMG image..."
     echo ""
     
-    # Determine DMG size based on macOS version
     local dmg_size
     case "$version_num" in
-        10.10|10.11|10.12|10.13|10.14)
-            dmg_size="7g"
-            ;;
-        10.15)
-            dmg_size="9g"
-            ;;
-        11|12|13)
-            dmg_size="15g"
-            ;;
-        14|15)
-            dmg_size="18g"
-            ;;
-        *)
-            dmg_size="20g"
-            ;;
+        10.10|10.11|10.12|10.13|10.14) dmg_size="7g" ;;
+        10.15) dmg_size="9g" ;;
+        11|12|13) dmg_size="15g" ;;
+        14|15) dmg_size="18g" ;;
+        26|27) dmg_size="20g" ;;
+        *) dmg_size="20g" ;;
     esac
     
-    # Create DMG disk image
     hdiutil create -quiet -size $dmg_size -volname "$(get_codename $version_num)_dmg" -fs HFS+ -type UDIF -attach "$WORK_DIR/installer.dmg"
     DISK_ID=$(diskutil list | grep $(get_codename $version_num)_dmg | head -1 | awk '{print $NF}' | sed 's/s[0-9]*$//')
     
-    # Prepare createinstallmedia command
     local cmd="sudo '$installer_path/Contents/Resources/createinstallmedia' --volume /Volumes/$(get_codename $version_num)_dmg --nointeraction"
     
-    # For macOS 10.12, need to patch Info.plist
-    # For macOS 10.10-10.12, need to add --applicationpath
     case "$version_num" in
-        10.10|10.11)
-            cmd="$cmd --applicationpath \"$installer_path\""
-            ;;
+        10.10|10.11) cmd="$cmd --applicationpath \"$installer_path\"" ;;
         10.12)
             log_info "Patching Info.plist for Sierra compatibility..."
             sudo /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '12.6.03'" "$installer_path/Contents/Info.plist"
@@ -1246,34 +1129,25 @@ create_dmg_10_10_and_later() {
             ;;
     esac
     
-    # Create install media
     log_info "Running createinstallmedia..."
     bash -c "$cmd"
     sync && sleep 5
     
-    # Restore Info.plist on macOS 10.12
     if [ "$version_num" == "10.12" ]; then
         sudo /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '12.6.06'" "/Applications/Install macOS Sierra.app/Contents/Info.plist"
         sudo /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '12.6.06'" "/Volumes/Install macOS Sierra/Install macOS Sierra.app/Contents/Info.plist"
     fi
     
     log_info "Starting DMG file size optimization..."
-    
-    # Check minimum size requirements
     MIN_SIZE=$(diskutil resizeVolume ${DISK_ID}s2 limits | grep "Minimum (constrained by file usage)" | sed 's/.*(\([0-9]*\) Bytes)/\1/')
     
-    # Add 50MB to $MIN_SIZE for macOS 10.10–10.11 because the installation fails when resized to the minimum size
     case "$version_num" in
-        10.10|10.11)
-            MIN_SIZE=$((MIN_SIZE + 52428800))
-            ;;
+        10.10|10.11) MIN_SIZE=$((MIN_SIZE + 52428800)) ;;
     esac
     
-    # Consolidate the installer data partition by shrinking the macOS installer partition to the minimum size.
     log_info "Shrinking macOS installer partition to minimum..."
     diskutil resizeVolume ${DISK_ID}s2 "${MIN_SIZE}B" free free 0 >/dev/null 2>&1
     
-    # Expand back to consolidate
     log_info "Expanding back to consolidate data ..."
     for attempt in $(seq 1 $RETRIES_COUNT); do
         log_info "Resize attempt $attempt of $RETRIES_COUNT..."
@@ -1287,18 +1161,13 @@ create_dmg_10_10_and_later() {
         fi
     done
     
-    # Extract the exact version number and append it to the file name
     local exact_version_number=$(defaults read "/Volumes/$(get_installer_app_name "$version_num")/System/Library/CoreServices/SystemVersion" ProductVersion)
     FINAL_OUTPUT_PATH="${output_file%.dmg}_$exact_version_number.dmg.img"
     
-    # Unmount
     detach_disk "$DISK_ID" && DISK_ID=""
     
-    # Optimize DMG file size
     log_info "Final optimization..."
     sudo hdiutil resize -size min "$WORK_DIR/installer.dmg"
-    
-    # Move to output and append .iso extension
     mv -f "$WORK_DIR/installer.dmg" "$FINAL_OUTPUT_PATH"
 }
 
@@ -1310,13 +1179,9 @@ main() {
     echo "╚══════════════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     
-    # Check for availble disk space
     check_disk_space
-    
-    # Require sudo
     check_sudo_access
     
-    # Validate image format (default to iso if empty, fallback to dmg if invalid input)
     IMAGE_FORMAT=$(echo "$IMAGE_FORMAT" | tr '[:upper:]' '[:lower:]')
     if [[ -z "$IMAGE_FORMAT" ]]; then
         IMAGE_FORMAT="iso"
@@ -1325,46 +1190,41 @@ main() {
         IMAGE_FORMAT="dmg"
     fi
     
-    # Normalize version input
     VERSION=$(echo "$VERSION" | tr '[:upper:]' '[:lower:]' | tr -d '_- ')
     
-    # Determine if input is a codename or version number
     VERSION_NUM=""
     VERSION_NAME=""
     
-    # Try as version number first, then as codename
     if [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         VERSION_NUM="$VERSION"
     else
         VERSION_NUM=$(get_version_number "$VERSION")
     fi
 
-    # Get proper codename (also validates the version number)
     VERSION_NAME=$(get_codename "$VERSION_NUM")
 
     if [ -z "$VERSION_NAME" ]; then
         log_info "Run with -h or --help for usage"
         echo ""
         log_error "Unknown macOS version: $VERSION"
-        log_info "Supported versions: 10.7, 10.8, 10.9, 10.10, 10.11, 10.12, 10.13, 10.14, 10.15, 11, 12, 13, 14, 15, 26"
-        log_info "Supported codenames: lion, mountain-lion, mavericks, yosemite, el-capitan, sierra, high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe"
+        log_info "Supported versions: 10.7, 10.8, 10.9, 10.10, 10.11, 10.12, 10.13, 10.14, 10.15, 11, 12, 13, 14, 15, 26, 27"
+        log_info "Supported codenames: lion, mountain-lion, mavericks, yosemite, el-capitan, sierra, high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe, golden-gate"
         exit 1
     fi
     
     log_info "Target macOS:${GREEN} $VERSION_NAME ($VERSION_NUM) ${NC}"
     log_info "Image format:${GREEN} $(echo $IMAGE_FORMAT | tr '[:lower:]' '[:upper:]') ${NC}"
+    if [ "$TORRENT_MODE" = true ]; then
+        log_info "Download mode:${GREEN} BitTorrent ${NC}"
+    fi
     
-    # Determine output filename if not specified
     if [ -z "$OUTPUT_PATH" ]; then
         OUTPUT_PATH="$(pwd)/macOS_${VERSION_NAME}.${IMAGE_FORMAT}"
     else
-        # Ensure output path has correct extension
         if [[ "$OUTPUT_PATH" != *.$IMAGE_FORMAT ]]; then
             OUTPUT_PATH="${OUTPUT_PATH%.*}.$IMAGE_FORMAT"
         fi
-        # Convert to absolute path
         if [[ "$OUTPUT_PATH" != /* ]]; then
-            # Use dirname + basename to avoid "./" in the middle
             OUTPUT_PATH="$(cd "$(dirname "$OUTPUT_PATH")" && pwd)/$(basename "$OUTPUT_PATH")"
         fi
     fi
@@ -1372,12 +1232,10 @@ main() {
     log_info "Output path:${GREEN} $OUTPUT_PATH ${NC}"
     echo ""
     
-    # Create work directory
     WORK_DIR=$(mktemp -d -t LongQT-sea)
     log_info "Working directory:${CYAN} $WORK_DIR ${NC}"
     echo ""
     
-    # Check if installer already exists
     INSTALLER_PATH=$(echo /Applications/$(get_installer_app_name "$VERSION_NUM").app)
     
     if [ -n "$INSTALLER_PATH" ] && [ -d "$INSTALLER_PATH" ]; then
@@ -1385,14 +1243,10 @@ main() {
         echo ""
     else
         log_info "Installer not found, downloading..."
-        
-        # Download and install
         if [[ "$VERSION_NUM" =~ ^10\.(7|8|9|10|11|12)$ ]]; then
-            # Legacy macOS versions
             download_legacy_macos "$VERSION_NUM"
             install_legacy_app "$VERSION_NUM" "$WORK_DIR/InstallMacOSX.dmg"
         else
-            # Modern macOS (10.13 and later)
             download_modern_macos "$VERSION_NUM" || exit 1
         fi
         
@@ -1402,7 +1256,6 @@ main() {
         fi
     fi
     
-    # Get volume name for the installer
     VOLUME_NAME=$(get_installer_app_name "$VERSION_NUM")
     
     if [ "$IMAGE_FORMAT" == "iso" ]; then
@@ -1425,18 +1278,14 @@ main() {
         esac
     fi
     
-    # Final checks
     if [ -f "$FINAL_OUTPUT_PATH" ]; then
         FILE_SIZE_BYTES=$(stat -f%z "$FINAL_OUTPUT_PATH")
         FILE_SIZE_GB=$(du -h "$FINAL_OUTPUT_PATH" | cut -f1)
-
-        # 4GB in bytes
         MIN_SIZE=4294967296
 
         if [ "$FILE_SIZE_BYTES" -lt "$MIN_SIZE" ]; then
             log_error "Final image is smaller than 4GB"
             log_error "The file is likely corrupted or incomplete"
-            log_warn "Remove corrupted file..."
             rm -f "$FINAL_OUTPUT_PATH"
             exit 1
         fi
@@ -1446,38 +1295,29 @@ main() {
         log_info "File: $FINAL_OUTPUT_PATH"
         log_info "Size: $FILE_SIZE_GB"
         echo ""
-        
-        if [ "$IMAGE_FORMAT" == "iso" ]; then
-            log_info "This ISO image is intended for creating macOS virtual machine:"
-            log_info "  - Compatible with Proxmox VE, QEMU, VMware, and VirtualBox"
-            log_info "  - Add as DVD/CD drive to the VM"
-            echo ""
-        else
-            log_info "This DMG image is intended for:"
-            log_info "  - Flash to USB drive using Rufus (Windows) or dd (Linux)"
-            log_info "  - Can also be used with virtual machines (requires conversion to .vhd for Hyper-V or .vmdk for VMware)"
-            log_info "  - Add to the VM as a virtual hard drive"
-            echo ""
-        fi
     else
         log_error "Failed to create macOS_${VERSION_NAME}.${IMAGE_FORMAT} image"
         exit 1
     fi
 }
 
-# Show usage if -h or --help is passed
-if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
-    cat << 'EOF'
-╔══════════════════════════════════════════════════════════════════════════════╗"
-║ mkmaciso – the ultimate tool for creating macOS installer ISO and DMG images ║"
-╚══════════════════════════════════════════════════════════════════════════════╝"
+for arg in "$@"; do
+    if [ "$arg" == "--help" ] || [ "$arg" == "-h" ]; then
+        cat << 'EOF'
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ mkmaciso – the ultimate tool for creating macOS installer ISO and DMG images ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
 Usage:
-  mkmaciso [VERSION] [FORMAT] [OUTPUT_PATH]
+  mkmaciso [OPTIONS] [VERSION] [FORMAT] [OUTPUT_PATH]
   mkmaciso                                     # Interactive mode
 
+Options:
+  --torrent         Use BitTorrent to download the installer (requires aria2c or transmission-cli)
+  -h, --help        Show this help message
+
 Parameters:
-  VERSION         macOS version number or codename, e.g. 26 or Tahoe
+  VERSION         macOS version number or codename, e.g. 27 or Golden Gate
   FORMAT          iso or dmg (default: iso)
   OUTPUT_PATH     Output file path (default: ./macOS_<version>.<format>)
 
@@ -1490,37 +1330,25 @@ Supported versions:
   10.12 Sierra           14     Sonoma
   10.13 High Sierra      15     Sequoia
                          26     Tahoe
+                         27     Golden Gate
 
 Examples:
   mkmaciso                              Interactive mode
-  mkmaciso 14                           Create Sonoma ISO
-  mkmaciso 14 dmg                       Create Sonoma DMG
-  mkmaciso sonoma dmg ~/Desktop/out.dmg Create Sonoma DMG at specified path
-
-Requirements:
-  - macOS 11 (Big Sur) or later for create macOS 10.13+ image
-  - Internet connection for downloading installers
-  - Sufficient disk space (~20-40GB temporary, final size varies)
-  - Administrator privileges (sudo)
-  - For best results, run this on Intel Macs
+  mkmaciso 27                           Create Golden Gate ISO
+  mkmaciso 27 dmg                       Create Golden Gate DMG
+  mkmaciso --torrent 27 dmg             Create Golden Gate DMG using torrent
 EOF
-    exit 0
-fi
+        exit 0
+    fi
+done
 
-# Check if running in interactive mode with piped (no parameters)
-if [ $# -eq 0 ]; then
+if [ ${#ARGS[@]} -eq 0 ]; then
     if [ -p /dev/stdin ] || [ ! -t 0 ]; then
         clear
         log_error "Interactive mode unavailable when piped"
-        log_info "Usage: curl -sL <URL> | bash -s <VERSION> [FORMAT] [OUTPUT]"
-        echo ""
-        log_info "Example: curl -sL <URL> | bash -s 26"
-        log_info "Example: curl -sL <URL> | bash -s 26 dmg"
-        log_info "Example: curl -sL <URL> | bash -s 26 iso ~/Desktop/Tahoe.iso"
         exit 1
     fi
     run_interactive_menu
 fi
 
-# Run main function
 main
