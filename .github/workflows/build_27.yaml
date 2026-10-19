@@ -19,7 +19,7 @@ jobs:
       - name: Run Build Script (Golden Gate)
         run: |
           echo "Starting Golden Gate build..."
-          # ./mkmaciso
+          # ./mkmaciso 27
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
