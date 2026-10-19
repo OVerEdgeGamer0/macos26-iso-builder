@@ -1,0 +1,33 @@
+name: macOS ISO Builder (Golden Gate)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          echo "macOS runner version: $(sw_vers -productVersion)"
+          brew install p7zip aria2 qemu
+
+      - name: Run Build Script (Golden Gate)
+        run: |
+          echo "Starting Golden Gate build..."
+          ./mkmaciso 27
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-Golden-Gate-ISO
+          path: |
+            *.iso
+            *.dmg
+            out/*.iso
+            output/*.dmg
+          if-no-files-found: warn
